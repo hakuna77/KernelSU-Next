@@ -78,7 +78,6 @@ static struct work_struct __maybe_unused stop_execve_hook_work;
 static struct work_struct __maybe_unused stop_input_hook_work;
 #else
 bool ksu_init_rc_hook __read_mostly = true;
-bool __maybe_unused ksu_vfs_read_hook = true;
 bool ksu_input_hook __read_mostly = true;
 bool ksu_execveat_hook __read_mostly = true;
 #endif
@@ -128,15 +127,20 @@ void on_module_mounted(void)
 	ksu_module_mounted = true;
 }
 
+#ifndef CONFIG_KSU_SUSFS
 extern void ksu_avc_spoof_late_init();
+#endif // #ifndef CONFIG_KSU_SUSFS
 void on_boot_completed(void)
 {
     ksu_boot_completed = true;
     pr_info("on_boot_completed!\n");
     track_throne(true);
+#ifndef CONFIG_KSU_SUSFS
     ksu_avc_spoof_late_init();
+#endif // #ifndef CONFIG_KSU_SUSFS
 }
 
+#ifndef CONFIG_KSU_SUSFS
 #define MAX_ARG_STRINGS 0x7FFFFFFF
 struct user_arg_ptr {
 #ifdef CONFIG_COMPAT
@@ -149,6 +153,7 @@ struct user_arg_ptr {
 #endif
 	} ptr;
 };
+#endif // #ifndef CONFIG_KSU_SUSFS
 
 static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
 {
@@ -233,6 +238,10 @@ static bool check_argv(struct user_arg_ptr argv, int index,
 	buf[buf_len - 1] = '\0';
 	return !strcmp(buf, expected);
 }
+
+#ifdef CONFIG_KSU_SUSFS
+extern int ksu_handle_execveat_init(struct filename *filename);
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 // IMPORTANT NOTE: the call from execve_handler_pre WON'T provided correct value for envp and flags in GKI version
 int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
@@ -339,7 +348,10 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
 			stop_execve_hook();
 		}
 	}
-
+#ifdef CONFIG_KSU_SUSFS
+    // - We need to run ksu_handle_execveat_init() at the very end in case the above checks are skipped
+    (void)ksu_handle_execveat_init(filename);
+#endif // #ifdef CONFIG_KSU_SUSFS
 	return 0;
 }
 
@@ -474,14 +486,22 @@ static bool is_init_rc(struct file *fp)
     return true;
 }
 
-static void ksu_apply_init_rc_proxy(struct file *file)
+void ksu_handle_sys_read(unsigned int fd)
 {
+    struct file *file = fget(fd);
+	if (!file) {
+		return;
+	}
+
+	if (!is_init_rc(file)) {
+		goto skip;
+ 	}
     // we only process the first read
     static bool rc_hooked = false;
     if (rc_hooked) {
         // we don't need these kprobe, unregister it!
         stop_init_rc_hook();
-        return;
+        goto skip;
     }
     rc_hooked = true;
 
@@ -505,17 +525,7 @@ static void ksu_apply_init_rc_proxy(struct file *file)
     }
     // replace the file_operations
     file->f_op = &fops_proxy;
-}
-
-void ksu_handle_sys_read(unsigned int fd)
-{
-    struct file *file = fget(fd);
-    if (!file) return;
-
-    if (is_init_rc(file)) {
-        ksu_apply_init_rc_proxy(file);
-    }
-
+skip:
     fput(file);
 }
 
@@ -754,22 +764,24 @@ int __maybe_unused ksu_handle_compat_execve_ksud(
 }
 #endif /* COMPAT & 64BIT */
 
-// working dummies for manual hooks
-int __maybe_unused ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
-                size_t *count_ptr, loff_t **pos)
-{
-    struct file *file = *file_ptr;
+#endif
 
-    if (IS_ERR_OR_NULL(file)) return 0;
+#ifdef CONFIG_KSU_SUSFS
+void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr) {
+    loff_t new_size = *kstat_size_ptr + ksu_rc_len;
+    struct file *file = fget(fd);
+
+    if (!file)
+        return;
 
     if (is_init_rc(file)) {
-        ksu_apply_init_rc_proxy(file);
+        pr_info("stat init.rc");
+        pr_info("adding ksu_rc_len: %lld -> %lld", *kstat_size_ptr, new_size);
+        *kstat_size_ptr = new_size;
     }
-
-    return 0;
+    fput(file);
 }
-
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 static void stop_init_rc_hook()
 {

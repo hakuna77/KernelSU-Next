@@ -157,7 +157,21 @@ static void destroy_kprobe(struct kprobe **kp_ptr)
 	kfree(kp);
 	*kp_ptr = NULL;
 }
-#endif // KSU_KPROBES_HOOK
+#else
+int ksu_handle_slow_avc_audit_new(u32 tsid, u16 *tclass)
+{
+	if (atomic_read(&disable_spoof))
+		return 0;
+
+	if (tsid != su_sid)
+		return 0;
+
+	pr_info("avc_spoof/slow_avc_audit: prevent log for sid: %u\n", su_sid);
+	*tclass = 0;
+
+	return 0;
+}
+#endif // CONFIG_KPROBES
 
 void ksu_avc_spoof_disable(void)
 {
